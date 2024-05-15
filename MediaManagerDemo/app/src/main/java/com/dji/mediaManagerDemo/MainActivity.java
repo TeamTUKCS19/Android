@@ -4,9 +4,15 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.ProgressDialog;
 import android.content.DialogInterface;
+import android.content.Intent;
+import android.database.Cursor;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.MediaStore;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -16,6 +22,7 @@ import android.widget.ImageView;
 import android.widget.SlidingDrawer;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.VideoView;
 
 import org.jetbrains.annotations.NotNull;
 
@@ -25,9 +32,15 @@ import androidx.recyclerview.widget.OrientationHelper;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.List;
 
 import dji.common.airlink.PhysicalSource;
@@ -45,6 +58,14 @@ import dji.sdk.media.FetchMediaTaskContent;
 import dji.sdk.media.FetchMediaTaskScheduler;
 import dji.sdk.media.MediaFile;
 import dji.sdk.media.MediaManager;
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.MediaType;
+import okhttp3.MultipartBody;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 public class MainActivity extends Activity implements View.OnClickListener {
 
@@ -61,10 +82,14 @@ public class MainActivity extends Activity implements View.OnClickListener {
     private ProgressDialog mLoadingDialog;
     private ProgressDialog mDownloadDialog;
     private SlidingDrawer mPushDrawerSd;
-    File destDir = new File(Environment.getExternalStorageDirectory().getPath() + "/MediaManagerDemo/");
+    public File destDir = new File(Environment.getExternalStorageDirectory().getPath() + "/video");
+    public Uri droneuri;
+    public File dronefile;
+    public File files;
+    public Uri sendVd;
     private int currentProgress = -1;
     private ImageView mDisplayImageView;
-    private int lastClickViewIndex =-1;
+    private int lastClickViewIndex = -1;
     private View lastClickView;
     private TextView mPushTv;
     private SettingsDefinitions.StorageLocation storageLocation;
@@ -77,14 +102,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         DemoApplication.getAircraftInstance().getCamera().setStorageStateCallBack(new StorageState.Callback() {
             @Override
             public void onUpdate(@NonNull @NotNull StorageState storageState) {
-                if(storageState.isInserted()) {
-                    storageLocation = SettingsDefinitions.StorageLocation.SDCARD;
-                    DemoApplication.getAircraftInstance().getCamera().setStorageLocation(SettingsDefinitions.StorageLocation.SDCARD, new CommonCallbacks.CompletionCallback() {
-                        @Override
-                        public void onResult(DJIError djiError) {
-                        }
-                    });
-                } else {
+                if (storageState.isInserted()) {
                     storageLocation = SettingsDefinitions.StorageLocation.INTERNAL_STORAGE;
                     DemoApplication.getAircraftInstance().getCamera().setStorageLocation(SettingsDefinitions.StorageLocation.INTERNAL_STORAGE, new CommonCallbacks.CompletionCallback() {
                         @Override
@@ -120,7 +138,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
             mMediaManager.removeFileListStateCallback(this.updateFileListStateListener);
             mMediaManager.removeMediaUpdatedVideoPlaybackStateListener(updatedVideoPlaybackStateListener);
             mMediaManager.exitMediaDownloading();
-            if (scheduler!=null) {
+            if (scheduler != null) {
                 scheduler.removeAllTasks();
             }
         }
@@ -153,9 +171,10 @@ public class MainActivity extends Activity implements View.OnClickListener {
 
     void initUI() {
 
+
         //Init RecyclerView
         listView = (RecyclerView) findViewById(R.id.filelistView);
-        LinearLayoutManager layoutManager = new LinearLayoutManager(MainActivity.this, RecyclerView.VERTICAL,false);
+        LinearLayoutManager layoutManager = new LinearLayoutManager(MainActivity.this, RecyclerView.VERTICAL, false);
         listView.setLayoutManager(layoutManager);
 
         //Init FileListAdapter
@@ -184,8 +203,8 @@ public class MainActivity extends Activity implements View.OnClickListener {
             }
         });
 
-        mPushDrawerSd = (SlidingDrawer)findViewById(R.id.pointing_drawer_sd);
-        mPushTv = (TextView)findViewById(R.id.pointing_push_tv);
+        mPushDrawerSd = (SlidingDrawer) findViewById(R.id.pointing_drawer_sd);
+        mPushTv = (TextView) findViewById(R.id.pointing_push_tv);
         mBackBtn = (Button) findViewById(R.id.back_btn);
         mDeleteBtn = (Button) findViewById(R.id.delete_btn);
         mDownloadBtn = (Button) findViewById(R.id.download_btn);
@@ -328,9 +347,9 @@ public class MainActivity extends Activity implements View.OnClickListener {
         mMediaManager = DemoApplication.getCameraInstance().getMediaManager();
         if (mMediaManager != null) {
 
-            if ((currentFileListState == MediaManager.FileListState.SYNCING) || (currentFileListState == MediaManager.FileListState.DELETING)){
+            if ((currentFileListState == MediaManager.FileListState.SYNCING) || (currentFileListState == MediaManager.FileListState.DELETING)) {
                 DJILog.e(TAG, "Media Manager is busy.");
-            }else{
+            } else {
                 mMediaManager.refreshFileListOfStorageLocation(storageLocation, djiError -> {
                     if (null == djiError) {
                         hideProgressDialog();
@@ -579,12 +598,12 @@ public class MainActivity extends Activity implements View.OnClickListener {
                 append("\n");
     }
 
-    private void downloadFileByIndex(final int index){
+    private void downloadFileByIndex(final int index) {
         if ((mediaFileList.get(index).getMediaType() == MediaFile.MediaType.PANORAMA)
                 || (mediaFileList.get(index).getMediaType() == MediaFile.MediaType.SHALLOW_FOCUS)) {
             return;
         }
-
+        String file_name = mediaFileList.get(index).getFileName();
         mediaFileList.get(index).fetchFileData(destDir, null, new DownloadListener<String>() {
             @Override
             public void onFailure(DJIError error) {
@@ -621,10 +640,14 @@ public class MainActivity extends Activity implements View.OnClickListener {
             public void onSuccess(String filePath) {
                 HideDownloadProgressDialog();
                 setResultToToast("Download File Success" + ":" + filePath);
+                dronefile = new File(filePath + "/" + file_name);
+                droneuri = Uri.fromFile(dronefile);
+                send2Server(dronefile);
                 currentProgress = -1;
             }
         });
     }
+
 
     private void deleteFileByIndex(final int index) {
         ArrayList<MediaFile> fileToDelete = new ArrayList<MediaFile>();
@@ -670,7 +693,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         }
     }
 
-    private void moveToPosition(){
+    private void moveToPosition() {
 
         LayoutInflater li = LayoutInflater.from(this);
         View promptsView = li.inflate(R.layout.prompt_input_position, null);
@@ -678,33 +701,164 @@ public class MainActivity extends Activity implements View.OnClickListener {
         alertDialogBuilder.setView(promptsView);
         final EditText userInput = (EditText) promptsView.findViewById(R.id.editTextDialogUserInput);
         alertDialogBuilder.setCancelable(false).setPositiveButton("OK", (dialog, id) -> {
-            String ms = userInput.getText().toString();
-            mMediaManager.moveToPosition(Integer.parseInt(ms),
-                    new CommonCallbacks.CompletionCallback() {
-                        @Override
-                        public void onResult(DJIError error) {
-                            if (null != error) {
-                                setResultToToast("Move to video position failed" + error.getDescription());
-                            } else {
-                                DJILog.e(TAG, "Move to video position successfully.");
-                            }
-                        }
-                    });
-        })
+                    String ms = userInput.getText().toString();
+                    mMediaManager.moveToPosition(Integer.parseInt(ms),
+                            new CommonCallbacks.CompletionCallback() {
+                                @Override
+                                public void onResult(DJIError error) {
+                                    if (null != error) {
+                                        setResultToToast("Move to video position failed" + error.getDescription());
+                                    } else {
+                                        DJILog.e(TAG, "Move to video position successfully.");
+                                    }
+                                }
+                            });
+                })
                 .setNegativeButton("Cancel", (dialog, id) -> dialog.cancel());
         AlertDialog alertDialog = alertDialogBuilder.create();
         alertDialog.show();
 
     }
 
-    @Override
+    public void getVideoFromGallery() {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("video/mp4");
+        startActivityForResult(intent, 1);
+    }
+
+    protected void onActivityResult(int requestCode, int resultCode, Intent data){
+        if (requestCode != 1 || resultCode != RESULT_OK) {
+            return;
+        }
+        sendVd = data.getData();
+
+        try {
+            InputStream in = getContentResolver().openInputStream(droneuri);
+
+            // 선택한 이미지 임시 저장
+            String date = new SimpleDateFormat("yyyy_MM_dd_hh_mm_ss").format(new Date());
+            files = new File(Environment.getExternalStorageDirectory()+"/video/DJI_0083.mp4");
+            files.mkdirs();
+            FileOutputStream out = new FileOutputStream(files);
+            byte[] buffer = new byte[1024];
+            int bytesRead;
+            while ((bytesRead = in.read(buffer)) != -1) {
+                out.write(buffer, 0, bytesRead);
+            }
+            in.close();
+            out.close();
+
+
+        } catch(IOException ioe) {
+            ioe.printStackTrace();
+        }
+    }
+    public void send2Server(File file){
+        RequestBody requestBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", file.getName(), RequestBody.create(MultipartBody.FORM, file))
+                .build();
+        Request request = new Request.Builder()
+                .url("http://172.30.1.23:9900/upload") // Server URL 은 본인 IP를 입력
+                .post(requestBody)
+                .build();
+
+        OkHttpClient client = new OkHttpClient();
+        client.newCall(request).enqueue(new Callback() {
+
+            @Override
+            public void onFailure(Call call, IOException e) {
+                setResultToToast("failure failed");
+                e.printStackTrace();
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                setResultToToast("send...");
+                Log.d("TEST : ", response.body().string());
+            }
+        });
+    }
+
+    public void uploadVideo(Uri videoUri) {
+        OkHttpClient client = new OkHttpClient();
+
+        // ContentResolver를 사용하여 URI로부터 파일을 읽어옴
+        File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM);
+        File videoFile = new File(dir, "Screen_recordings/Screen_Recording_20240321-145008_MediaManagerDemo");
+
+        MediaType mediaType = MediaType.parse("video/mp4"); // 동영상 파일의 MIME 타입 설정
+        RequestBody requestBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("video", videoFile.getName(), RequestBody.create(mediaType, videoFile))
+                .build();
+
+        Request request = new Request.Builder()
+                .url("http://172.30.1.23:9900/upload") // 플라스크 서버의 엔드포인트 URL로 수정
+                .post(requestBody)
+                .build();
+
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                if (response.isSuccessful()) {
+                    setResultToToast("success");
+                } else {
+                    setResultToToast("failed");
+                }
+            }
+
+            @Override
+
+            public void onFailure(Call call, IOException e) {
+                e.printStackTrace();
+                setResultToToast("fail failed");
+            }
+        });
+    }
+
+    /*public static void ping() {
+        OkHttpClient client = new OkHttpClient();
+
+        // 서버 URL
+        String url = "http://172.30.1.23:9900/ping";
+
+        // 요청 생성
+        Request request = new Request.Builder()
+                .url(url)
+                .post(RequestBody.create(null, new byte[0])) // 빈 요청 본문
+                .build();
+
+        // 비동기적으로 요청 보내고 응답 처리
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                if (response.isSuccessful()) {
+                    // 서버가 요청을 성공적으로 처리한 경우
+                    System.out.println("서버 응답: " + response.body().string());
+                } else {
+                    // 서버가 요청을 실패로 처리한 경우
+                    System.out.println("서버 응답 실패: " + response.code());
+                }
+            }
+
+            @Override
+            public void onFailure(Call call, IOException e) {
+                // 네트워크 오류 등으로 요청을 보낼 수 없는 경우
+                e.printStackTrace();
+            }
+        });
+    }
+*/
+
+
     public void onClick(View v) {
         switch (v.getId()) {
             case R.id.back_btn: {
                 this.finish();
                 break;
             }
-            case R.id.delete_btn:{
+            case R.id.delete_btn: {
                 deleteFileByIndex(lastClickViewIndex);
                 break;
             }
@@ -749,17 +903,19 @@ public class MainActivity extends Activity implements View.OnClickListener {
                 break;
             }
             case R.id.stop_btn: {
-                mMediaManager.stop(error -> {
+                /*mMediaManager.stop(error -> {
                     if (null != error) {
                         setResultToToast("Stop Video Failed" + error.getDescription());
                     } else {
                         DJILog.e(TAG, "Stop Video Success");
                     }
-                });
+                });*/
+                getVideoFromGallery();
                 break;
             }
             case R.id.moveTo_btn: {
-                moveToPosition();
+                send2Server(dronefile);
+                //uploadVideo(sendVd);
                 break;
             }
             default:
