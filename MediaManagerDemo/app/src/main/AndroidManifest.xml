@@ -18,9 +18,10 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:required="true"/>
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-feature android:name="android.hardware.camera" />
     <uses-feature android:name="android.hardware.camera.autofocus" />
+
     <uses-feature
         android:name="android.hardware.usb.host"
         android:required="false" />
@@ -48,7 +49,12 @@
         <meta-data
             android:name="com.dji.sdk.API_KEY"
             android:value="524b5f79b7e48b98733fe209" />
-
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyBTleXet43Ei9OiHwyE8Zplb2pv372Og8c" />
+        <meta-data
+            android:name="com.google.android.gms.version"
+            android:value="@integer/google_play_services_version" />
         <!-- DJI SDK -->
         <activity
             android:name=".ConnectionActivity"

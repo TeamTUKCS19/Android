@@ -1,14 +1,22 @@
 package com.dji.mediaManagerDemo;
 
+import static java.sql.Types.NULL;
+
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.ProgressDialog;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
@@ -19,6 +27,8 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.RadioGroup;
 import android.widget.SlidingDrawer;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -27,15 +37,29 @@ import android.widget.VideoView;
 import org.jetbrains.annotations.NotNull;
 
 import androidx.annotation.NonNull;
+import androidx.core.app.ActivityCompat;
+import androidx.fragment.app.FragmentActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.OrientationHelper;
 import androidx.recyclerview.widget.RecyclerView;
+
+import com.google.android.gms.maps.CameraUpdate;
+import com.google.android.gms.maps.CameraUpdateFactory;
+import com.google.android.gms.maps.GoogleMap;
+import com.google.android.gms.maps.OnMapReadyCallback;
+import com.google.android.gms.maps.SupportMapFragment;
+import com.google.android.gms.maps.model.BitmapDescriptorFactory;
+import com.google.android.gms.maps.model.LatLng;
+import com.google.android.gms.maps.model.Marker;
+import com.google.android.gms.maps.model.MarkerOptions;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.text.DecimalFormat;
+import java.text.Format;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -48,16 +72,24 @@ import dji.common.camera.SettingsDefinitions;
 import dji.common.camera.StorageState;
 import dji.common.error.DJICameraError;
 import dji.common.error.DJIError;
+import dji.common.flightcontroller.FlightControllerState;
+import dji.common.flightcontroller.FlightMode;
+import dji.common.flightcontroller.LocationCoordinate3D;
+import dji.common.flightcontroller.flyzone.FlyZoneInformation;
 import dji.common.product.Model;
 import dji.common.util.CommonCallbacks;
 import dji.log.DJILog;
+import dji.midware.data.model.P3.DataOsdGetPushCommon;
 import dji.sdk.base.BaseProduct;
+import dji.sdk.flightcontroller.FlightController;
 import dji.sdk.media.DownloadListener;
 import dji.sdk.media.FetchMediaTask;
 import dji.sdk.media.FetchMediaTaskContent;
 import dji.sdk.media.FetchMediaTaskScheduler;
 import dji.sdk.media.MediaFile;
 import dji.sdk.media.MediaManager;
+import dji.sdk.products.Aircraft;
+import dji.sdk.sdkmanager.DJISDKManager;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.MediaType;
@@ -66,11 +98,15 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
+import dji.sdk.flighthub.model.*;
 
-public class MainActivity extends Activity implements View.OnClickListener {
+
+public class MainActivity extends FragmentActivity implements View.OnClickListener, GoogleMap.OnMapClickListener, OnMapReadyCallback {
 
     private static final String TAG = MainActivity.class.getName();
-
+    private double droneLocationLat = 45, droneLocationLng = 45;
+    private Marker marker;
+    private FlightController mFlightController = null;
     private Button mBackBtn, mDeleteBtn, mReloadBtn, mDownloadBtn, mStatusBtn;
     private Button mPlayBtn, mResumeBtn, mPauseBtn, mStopBtn, mMoveToBtn;
     private RecyclerView listView;
@@ -85,8 +121,6 @@ public class MainActivity extends Activity implements View.OnClickListener {
     public File destDir = new File(Environment.getExternalStorageDirectory().getPath() + "/video");
     public Uri droneuri;
     public File dronefile;
-    public File files;
-    public Uri sendVd;
     private int currentProgress = -1;
     private ImageView mDisplayImageView;
     private int lastClickViewIndex = -1;
@@ -94,11 +128,24 @@ public class MainActivity extends Activity implements View.OnClickListener {
     private TextView mPushTv;
     private SettingsDefinitions.StorageLocation storageLocation;
 
+    private GoogleMap gMap;
+
+    public LatLng latlng;
+    public LatLng pos;
+
+    public double latitude;
+    public double longtitude;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         initUI();
+
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(DemoApplication.FLAG_CONNECTION_CHANGE);
+        registerReceiver(mReceiver, filter);
+
         DemoApplication.getAircraftInstance().getCamera().setStorageStateCallBack(new StorageState.Callback() {
             @Override
             public void onUpdate(@NonNull @NotNull StorageState storageState) {
@@ -112,12 +159,21 @@ public class MainActivity extends Activity implements View.OnClickListener {
                 }
             }
         });
+
+        initFlightController();
+        SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager().findFragmentById(R.id.map);
+        mapFragment.getMapAsync(this);
+    }
+
+    private void setUpMap() {
+        gMap.setOnMapClickListener(this);// add the listener for click for amap object
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         initMediaManager();
+        initFlightController();
     }
 
     @Override
@@ -132,6 +188,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
 
     @Override
     protected void onDestroy() {
+        super.onDestroy();
         lastClickView = null;
         if (mMediaManager != null) {
             mMediaManager.stop(null);
@@ -166,7 +223,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         if (mediaFileList != null) {
             mediaFileList.clear();
         }
-        super.onDestroy();
+        unregisterReceiver(mReceiver);
     }
 
     void initUI() {
@@ -720,48 +777,20 @@ public class MainActivity extends Activity implements View.OnClickListener {
 
     }
 
-    public void getVideoFromGallery() {
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-        intent.setType("video/mp4");
-        startActivityForResult(intent, 1);
-    }
-
-    protected void onActivityResult(int requestCode, int resultCode, Intent data){
-        if (requestCode != 1 || resultCode != RESULT_OK) {
-            return;
-        }
-        sendVd = data.getData();
-
-        try {
-            InputStream in = getContentResolver().openInputStream(droneuri);
-
-            // 선택한 이미지 임시 저장
-            String date = new SimpleDateFormat("yyyy_MM_dd_hh_mm_ss").format(new Date());
-            files = new File(Environment.getExternalStorageDirectory()+"/video/DJI_0083.mp4");
-            files.mkdirs();
-            FileOutputStream out = new FileOutputStream(files);
-            byte[] buffer = new byte[1024];
-            int bytesRead;
-            while ((bytesRead = in.read(buffer)) != -1) {
-                out.write(buffer, 0, bytesRead);
-            }
-            in.close();
-            out.close();
-
-
-        } catch(IOException ioe) {
-            ioe.printStackTrace();
-        }
-    }
     public void send2Server(File file){
+
         RequestBody requestBody = new MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("file", file.getName(), RequestBody.create(MultipartBody.FORM, file))
+                .addFormDataPart("latitude", "3")
+                .addFormDataPart("longitude" , "4")
+                .addFormDataPart("altitude" , "5")
                 .build();
         Request request = new Request.Builder()
-                .url("http://172.30.1.23:9900/upload") // Server URL 은 본인 IP를 입력
+                .url("http://13.209.231.12:9900/upload_video") // Server URL 은 본인 IP를 입력
                 .post(requestBody)
                 .build();
+
 
         OkHttpClient client = new OkHttpClient();
         client.newCall(request).enqueue(new Callback() {
@@ -776,9 +805,11 @@ public class MainActivity extends Activity implements View.OnClickListener {
             public void onResponse(Call call, Response response) throws IOException {
                 setResultToToast("send...");
                 Log.d("TEST : ", response.body().string());
+
             }
         });
     }
+
 
     public void uploadVideo(Uri videoUri) {
         OkHttpClient client = new OkHttpClient();
@@ -794,7 +825,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
                 .build();
 
         Request request = new Request.Builder()
-                .url("http://172.30.1.23:9900/upload") // 플라스크 서버의 엔드포인트 URL로 수정
+                .url("http://13.209.231.12:9900/upload_video") // 플라스크 서버의 엔드포인트 URL로 수정
                 .post(requestBody)
                 .build();
 
@@ -816,41 +847,6 @@ public class MainActivity extends Activity implements View.OnClickListener {
             }
         });
     }
-
-    /*public static void ping() {
-        OkHttpClient client = new OkHttpClient();
-
-        // 서버 URL
-        String url = "http://172.30.1.23:9900/ping";
-
-        // 요청 생성
-        Request request = new Request.Builder()
-                .url(url)
-                .post(RequestBody.create(null, new byte[0])) // 빈 요청 본문
-                .build();
-
-        // 비동기적으로 요청 보내고 응답 처리
-        client.newCall(request).enqueue(new Callback() {
-            @Override
-            public void onResponse(Call call, Response response) throws IOException {
-                if (response.isSuccessful()) {
-                    // 서버가 요청을 성공적으로 처리한 경우
-                    System.out.println("서버 응답: " + response.body().string());
-                } else {
-                    // 서버가 요청을 실패로 처리한 경우
-                    System.out.println("서버 응답 실패: " + response.code());
-                }
-            }
-
-            @Override
-            public void onFailure(Call call, IOException e) {
-                // 네트워크 오류 등으로 요청을 보낼 수 없는 경우
-                e.printStackTrace();
-            }
-        });
-    }
-*/
-
 
     public void onClick(View v) {
         switch (v.getId()) {
@@ -893,13 +889,15 @@ public class MainActivity extends Activity implements View.OnClickListener {
                 break;
             }
             case R.id.pause_btn: {
-                mMediaManager.pause(error -> {
+                /*mMediaManager.pause(error -> {
                     if (null != error) {
                         setResultToToast("Pause Video Failed" + error.getDescription());
                     } else {
                         DJILog.e(TAG, "Pause Video Success");
                     }
-                });
+                });*/
+                updateDroneLocation();
+                cameraUpdate();
                 break;
             }
             case R.id.stop_btn: {
@@ -910,7 +908,25 @@ public class MainActivity extends Activity implements View.OnClickListener {
                         DJILog.e(TAG, "Stop Video Success");
                     }
                 });*/
-                getVideoFromGallery();
+                //initFlightController();
+                //updateDroneLocation();
+                printSurroundFlyZones();
+                latlng = new LatLng(DataOsdGetPushCommon.getInstance().getLatitude(),
+                        DataOsdGetPushCommon.getInstance().getLongitude());
+                if (latlng != null) {
+                    //Create MarkerOptions object
+                    final MarkerOptions markerOptions = new MarkerOptions();
+                    markerOptions.position(latlng);
+                    markerOptions.icon(BitmapDescriptorFactory.fromResource(R.drawable.aircraft));
+                    marker = gMap.addMarker(markerOptions);
+                }
+                gMap.moveCamera(CameraUpdateFactory.newLatLng(latlng));
+                gMap.animateCamera(CameraUpdateFactory.zoomTo(15.0f));
+
+                setResultToToast("위도" + latitude);
+                setResultToToast("경도" + longtitude);
+
+                //getLocation(Flight);
                 break;
             }
             case R.id.moveTo_btn: {
@@ -921,6 +937,156 @@ public class MainActivity extends Activity implements View.OnClickListener {
             default:
                 break;
         }
+    }
+    protected BroadcastReceiver mReceiver = new BroadcastReceiver() {
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            onProductConnectionChange();
+        }
+    };
+
+    private void onProductConnectionChange()
+    {
+        initFlightController();
+    }
+    private boolean isFlightControllerSupported() {
+        return DJISDKManager.getInstance().getProduct() != null &&
+                DJISDKManager.getInstance().getProduct() instanceof Aircraft &&
+                ((Aircraft) DJISDKManager.getInstance().getProduct()).getFlightController() != null;
+    }
+
+    private void initFlightController() {
+
+        if (isFlightControllerSupported()) {
+            mFlightController = ((Aircraft) DJISDKManager.getInstance().getProduct()).getFlightController();
+            mFlightController.setStateCallback(new FlightControllerState.Callback() {
+                @Override
+                public void onUpdate(FlightControllerState
+                                             djiFlightControllerCurrentState) {
+                    if (gMap != null) {
+                        droneLocationLat = djiFlightControllerCurrentState.getAircraftLocation().getLatitude();
+                        droneLocationLng = djiFlightControllerCurrentState.getAircraftLocation().getLongitude();
+                        updateDroneLocation();
+                    }
+                }
+            });
+        }
+    }
+    public static boolean checkGpsCoordination(double latitude, double longitude) {
+        return (latitude > -90 && latitude < 90 && longitude > -180 && longitude < 180) && (latitude != 0f && longitude != 0f);
+    }
+
+    private void updateDroneLocation(){
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (marker != null) {
+                    marker.remove();
+                }
+                if (checkGpsCoordination(droneLocationLat, droneLocationLng)) {
+
+                    pos = new LatLng(droneLocationLat, droneLocationLng);
+
+                    //Create MarkerOptions object
+                    final MarkerOptions markerOptions = new MarkerOptions();
+                    markerOptions.position(pos);
+                    markerOptions.icon(BitmapDescriptorFactory.fromResource(R.drawable.aircraft));
+                    marker = gMap.addMarker(markerOptions);
+                }
+            }
+        });
+    }
+    @Override
+    public void onMapClick(com.google.android.gms.maps.model.LatLng latLng) {
+        if(marker != null){
+            marker.remove();
+        }
+        marker = gMap.addMarker(new MarkerOptions().position(latLng));
+        LatLng markerLatLng = latLng;
+        gMap.moveCamera(CameraUpdateFactory.newLatLng(markerLatLng)); // 카메라 변경
+
+        latitude = markerLatLng.latitude;
+        longtitude = markerLatLng.longitude;
+    }
+
+    public void onMapReady(GoogleMap googleMap) {
+        LatLng paloAlto = new LatLng(37.3401906, 126.7335293); // 기준점
+
+        gMap = googleMap;
+
+        gMap.addMarker(new MarkerOptions().position(paloAlto).title("Marker in here"));
+        gMap.moveCamera(CameraUpdateFactory.newLatLng(paloAlto));
+        gMap.animateCamera(CameraUpdateFactory.zoomTo(17.0f));
+        if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            gMap.setMyLocationEnabled(true);
+            return;
+        }
+        gMap.setOnMapClickListener(this);
+        printSurroundFlyZones();
+
+    }
+    private void printSurroundFlyZones() {
+
+        DJISDKManager.getInstance().getFlyZoneManager().getFlyZonesInSurroundingArea(new CommonCallbacks.CompletionCallbackWith<ArrayList<FlyZoneInformation>>() {
+            @Override
+            public void onSuccess(ArrayList<FlyZoneInformation> flyZones) {
+                setResultToText("get surrounding Fly Zone Success!");
+                showSurroundFlyZonesInTv(flyZones);
+            }
+
+            @Override
+            public void onFailure(DJIError error) {
+                setResultToText(error.getDescription());
+            }
+        });
+    }
+
+    private void showSurroundFlyZonesInTv(final List<FlyZoneInformation> flyZones) {
+        MainActivity.this.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                StringBuffer sb = new StringBuffer();
+                for (FlyZoneInformation flyZone : flyZones) {
+                    if (flyZone != null && flyZone.getCategory() != null){
+
+                        sb.append("FlyZoneId: ").append(flyZone.getFlyZoneID()).append("\n");
+                        sb.append("Category: ").append(flyZone.getCategory().name()).append("\n");
+                        sb.append("Latitude: ").append(flyZone.getCoordinate().getLatitude()).append("\n");
+                        sb.append("Longitude: ").append(flyZone.getCoordinate().getLongitude()).append("\n");
+                        sb.append("FlyZoneType: ").append(flyZone.getFlyZoneType().name()).append("\n");
+                        sb.append("Radius: ").append(flyZone.getRadius()).append("\n");
+                        sb.append("Shape: ").append(flyZone.getShape().name()).append("\n");
+                        sb.append("StartTime: ").append(flyZone.getStartTime()).append("\n");
+                        sb.append("EndTime: ").append(flyZone.getEndTime()).append("\n");
+                        sb.append("UnlockStartTime: ").append(flyZone.getUnlockStartTime()).append("\n");
+                        sb.append("UnlockEndTime: ").append(flyZone.getUnlockEndTime()).append("\n");
+                        sb.append("Name: ").append(flyZone.getName()).append("\n");
+                        sb.append("\n");
+                    }
+                }
+
+            }
+
+        });
+
+    }
+    public void getLocation(double A, double B) {
+        DecimalFormat df = new DecimalFormat("#.##");
+        String formatted = df.format(A);
+        String formatteds = df.format(B);
+
+        setResultToToast("위도 : " + formatteds);
+        setResultToToast("경도 : " + formatted);
+    }
+
+    private void cameraUpdate(){
+        LatLng pos = new LatLng(droneLocationLat, droneLocationLng);
+        float zoomlevel = (float) 18.0;
+        CameraUpdate cu = CameraUpdateFactory.newLatLngZoom(pos, zoomlevel);
+        gMap.moveCamera(cu);
+        setResultToToast("위도" + pos.latitude);
+        setResultToToast("경도" + pos.longitude);
     }
 
     private boolean isMavicAir2() {

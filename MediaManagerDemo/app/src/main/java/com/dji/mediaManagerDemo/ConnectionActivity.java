@@ -64,6 +64,7 @@ public class ConnectionActivity extends Activity implements View.OnClickListener
             Manifest.permission.WRITE_EXTERNAL_STORAGE,
             Manifest.permission.READ_EXTERNAL_STORAGE,
             Manifest.permission.READ_PHONE_STATE,
+
     };
     private List<String> missingPermission = new ArrayList<>();
     private AtomicBoolean isRegistrationInProgress = new AtomicBoolean(false);

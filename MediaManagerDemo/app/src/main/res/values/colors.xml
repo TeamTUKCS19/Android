@@ -8,4 +8,6 @@
     <color name="background_blue">#242d34</color>
     <color name="transparent">#00000000</color>
     <color name="dark_gray">#80000000</color>
+    <color name="button_normal">#50808080</color>
+    <color name="button_press">#5086BFFF</color>
 </resources>
